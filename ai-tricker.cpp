@@ -5,8 +5,15 @@
 #include <chrono>
 #include "AI.h"
 #include "constants.h"
+#include "utils.hpp"
 
 #define PI 3.1415
+#define VERSION 230519.1
+
+// 辅助函数
+int (*G2C)(int) = IAPI::GridToCell;
+int (*C2G)(int) = IAPI::CellToGrid;
+
 // 为假则play()期间确保游戏状态不更新，为真则只保证游戏状态在调用相关方法时不更新
 extern const bool asynchronous = false;
 
@@ -17,7 +24,11 @@ extern const std::array<THUAI6::StudentType, 4> studentType = {
     THUAI6::StudentType::StraightAStudent,
     THUAI6::StudentType::StraightAStudent };
 
+// Tricker职业，修改职业同时需要修改数值
 extern const THUAI6::TrickerType trickerType = THUAI6::TrickerType::Assassin;
+const int attack_dist_limit = 1480;
+const int skill_dist_limit = 3700;
+
 // 记录函数
 
 // 定义非常多的状态（有限状态机）
@@ -36,20 +47,22 @@ enum class status
 
 static status BotStatus = status::idle;
 static status LastStatus = status::reset;
+
 // 存储路径的常量
 const int MAXN = 50;
 int a[MAXN][MAXN];      // 存储地图
 int vis[MAXN][MAXN];    // 标记数组，记录每个点是否被访问过
 int dis[MAXN][MAXN];    // 记录每个点到起点的最短距离
 int pre[MAXN][MAXN][2]; // 记录每个点的前驱节点
-// 定义坐标结构体
 
+// 定义坐标结构体
 struct Point
 {
     int x, y;
     Point() {}
     Point(int x, int y) : x(x), y(y) {}
 };
+
 // 定义队列元素结构体
 struct Node
 {
@@ -62,13 +75,13 @@ struct Node
         return dist > other.dist;
     }
 };
+
 // 状态机函数
 void playerBot(ITrickerAPI&);
 void moveStatus(ITrickerAPI& api);
 void retreatStatus(ITrickerAPI& api);
 void initialStatus(ITrickerAPI& api);
 void idleStatus(ITrickerAPI& api);
-
 
 // 函数
 
@@ -88,6 +101,7 @@ bool progressStuckCheck(int, int);
 int boolArrayCount(bool[], int);
 void boolArrayReset(bool[], int);
 bool isTrigger(ITrickerAPI&, Point);
+
 // debug相关
 void printPathType(ITrickerAPI&, std::queue<Point>);
 void printQueue(std::queue<Point> q);
@@ -135,33 +149,38 @@ std::vector<Point> door;
 std::vector<Point> window;
 std::vector<Point> gate;
 std::vector<Point> chest;
+
 // 决策相关变量
+
 // 总决策函数相关变量
 int decision;
-
 /*
     decision = 1 追击
     decision = 2 巡逻
 ...
 */
+
 // 爬窗相关变量
 static bool isCrossingWindow = 0;
 static bool climbingCheck = 0;
 static int climbingFrameCount = 0;
+
 // 巡逻相关变量
 bool hwIsFinished[10];
 bool hwControl[10];// 判断是否已经到达过该点
 int patrolMode;
-
 /*
 patrolMode = 1 在作业间巡逻
 patrolMode = 2 在作业和校门间巡逻
 patrolMode = 3 在校门间巡逻
 */
+
 // 追击相关变量
 int chasingFrameCount;
 bool chasingProtect;
+
 //========================================
+
 void AI::play(IStudentAPI& api)
 {
     // 公共操作
@@ -197,14 +216,24 @@ void antiJuan(ITrickerAPI& api) {
     auto stus = api.GetStudents();
     if (stus.size() != 0) {
         Point stu_loc = { -100,-100 };
-        Point now_loc = { api.GetSelfInfo()->x / 1000, api.GetSelfInfo()->y / 1000 };
+        Point now_loc_grid = { api.GetSelfInfo()->x, api.GetSelfInfo()->y };
+        Point now_loc = { G2C(now_loc_grid.x), G2C(now_loc_grid.y) };
         for (int i = 0; i < stus.size(); i++) {
-            Point temp_loc = { stus[i]->x / 1000, stus[i]->y / 1000 };
-            if (Distance(now_loc, temp_loc) < Distance(now_loc, stu_loc) && (int)stus[i]->playerState != 3) {
+            Point temp_loc_grid = { stus[i]->x,stus[i]->y };
+            Point temp_loc = { G2C(temp_loc_grid.x), G2C(temp_loc_grid.y) };
+            if (Distance(now_loc, temp_loc) < Distance(now_loc, stu_loc) && stus[i]->playerState != THUAI6::PlayerState::Addicted)
                 stu_loc = temp_loc;
+            if (api.GetSelfInfo()->timeUntilSkillAvailable[0] == 0 && stus[i]->playerState != THUAI6::PlayerState::Addicted)
+                api.UseSkill(0);    // 隐身，主要是得分；除此以外可以更加接近学生
+            if (Distance(now_loc_grid, temp_loc_grid) <= skill_dist_limit && stus[i]->playerState != THUAI6::PlayerState::Addicted) {
+                if (api.GetSelfInfo()->timeUntilSkillAvailable[1] == 0)
+                    api.UseSkill(1);    // 启动飞刀，飞刀时间短，力求充分使用
+                api.Attack(atan2(temp_loc_grid.y - now_loc_grid.y, temp_loc_grid.x - now_loc_grid.x));
+                BotStatus = status::idle;
+                return;
             }
-            if (Distance(now_loc, temp_loc) <= sqrt(2) && (int)stus[i]->playerState != 3) {
-                api.Attack(atan2(temp_loc.y - now_loc.y, temp_loc.x - now_loc.x));
+            if (Distance(now_loc_grid, temp_loc_grid) <= attack_dist_limit && stus[i]->playerState != THUAI6::PlayerState::Addicted) {
+                api.Attack(atan2(temp_loc_grid.y - now_loc_grid.y, temp_loc_grid.x - now_loc_grid.x));
                 BotStatus = status::idle;
                 return;
             }
@@ -226,6 +255,7 @@ void antiJuan(ITrickerAPI& api) {
     BotStatus = status::idle;
     return;
 }
+
 void patrolMode1(ITrickerAPI& api)
 {
     double dis = 999999;
@@ -302,6 +332,7 @@ void walkingAround(ITrickerAPI& api)
     }
 
 }
+
 int boolArrayCount(bool arr[], int n)
 {
     int count = 0;
@@ -314,6 +345,7 @@ int boolArrayCount(bool arr[], int n)
     }
     return count;
 }
+
 void boolArrayReset(bool arr[], int n)
 {
     for (int i = 0; i < n; i++)
@@ -321,6 +353,7 @@ void boolArrayReset(bool arr[], int n)
         arr[i] = 0;
     }
 }
+
 void searchingArrayClear()
 {
     int i, j;
@@ -335,6 +368,7 @@ void searchingArrayClear()
         }
     }
 }
+
 void InitMapForMove(IAPI& api)
 {
     int i, j;
@@ -460,6 +494,7 @@ std::queue<Point> bfs(Point start, Point end)
     printQueue(path);
     return path;
 }
+
 void printQueue(std::queue<Point> q)
 {
     // printing content of queue
@@ -470,6 +505,7 @@ void printQueue(std::queue<Point> q)
     }
     std::cout << std::endl;
 }
+
 void printPointVector(std::vector<Point> v)
 {
     for (int i = 0; i < v.size(); i++)
@@ -478,6 +514,7 @@ void printPointVector(std::vector<Point> v)
     }
     std::cout << std::endl;
 }
+
 bool isSurround(ITrickerAPI& api, int x, int y)
 {
     double distance;
@@ -489,6 +526,7 @@ bool isSurround(ITrickerAPI& api, int x, int y)
         return true;
     return false;
 }
+
 bool isTrigger(ITrickerAPI& api, Point p)
 {
     auto self = api.GetSelfInfo();
@@ -498,6 +536,7 @@ bool isTrigger(ITrickerAPI& api, Point p)
         return true;
     return false;
 }
+
 void Goto(ITrickerAPI& api, double destX, double destY, double randAngle = 0)
 {
     // std::printf("goto %d,%d\n", destX, destY);
@@ -515,6 +554,7 @@ void Goto(ITrickerAPI& api, double destX, double destY, double randAngle = 0)
     if (delta_x != 0 && delta_y != 0)
         api.Move(300, ang + (std::rand() % 10 - 5) * PI / 10 * randAngle);
 }
+
 // 判断实际速度是否为0（防止卡墙上）
 bool stuckCheck(ITrickerAPI& api, int n)
 {
@@ -545,6 +585,7 @@ bool stuckCheck(ITrickerAPI& api, int n)
         return false;
     }
 }
+
 bool progressStuckCheck(int progress, int n) // 需要更新！
 
 {
@@ -573,15 +614,18 @@ bool progressStuckCheck(int progress, int n) // 需要更新！
     */
     return false;
 }
+
 double Distance(Point a, Point b)
 {
     return (sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)));
 }
+
 int pathLen(Point a, Point b)
 {
     auto tempPath = bfs(a, b);
     return tempPath.size();
 }
+
 void printPathType(ITrickerAPI& api, std::queue<Point> q)
 {
     while (!q.empty())
@@ -591,6 +635,7 @@ void printPathType(ITrickerAPI& api, std::queue<Point> q)
     }
     std::cout << std::endl;
 }
+
 void printPosition(ITrickerAPI& api)
 {
     auto self = api.GetSelfInfo();
@@ -613,6 +658,7 @@ bool isWindowInPath(ITrickerAPI& api, std::queue<Point> p)
     }
     return false;
 }
+
 bool isSurroundWindow(ITrickerAPI& api)
 {
     auto self = api.GetSelfInfo();
@@ -631,6 +677,7 @@ bool isSurroundWindow(ITrickerAPI& api)
     }
     return false;
 }
+
 //爬完窗后不会重复爬
 bool isDelayedAfterWindow(ITrickerAPI& api)
 {
@@ -646,6 +693,7 @@ bool isDelayedAfterWindow(ITrickerAPI& api)
     }
     return !climbingCheck;
 }
+
 void botInit(ITrickerAPI& api)      //状态机的初始化
 {
     std::ios::sync_with_stdio(false);
@@ -715,19 +763,19 @@ void playerBot(ITrickerAPI& api)
     }
     api.Wait();
 }
+
 //=============================================
 
 // ——————————————状态机函数—————————————————————————————
-
 
 void moveStatus(ITrickerAPI& api)
 {
     auto self = api.GetSelfInfo();
     std::cout << "move!" << std::endl;
     std::cout << "isSurroundWindow:" << isSurroundWindow(api) << std::endl;
-    if (isCrossingWindow == 1)
+    if (isCrossingWindow)
     {
-        if (isSurroundWindow(api) == 1 && isDelayedAfterWindow(api) == 1)
+        if (isSurroundWindow(api) && isDelayedAfterWindow(api))
         {
             std::cout << "my skipping window!" << std::endl;
             api.SkipWindow();
@@ -738,7 +786,7 @@ void moveStatus(ITrickerAPI& api)
     if (isSurround(api, path.front().x + 0.5, path.front().y + 0.5))
         path.pop();
 
-    if ((int)api.GetPlaceType(targetP.x, targetP.y) == 4)
+    if (api.GetPlaceType(targetP.x, targetP.y) == THUAI6::PlaceType::ClassRoom)
     {
         if (!path.empty() && !isTrigger(api, targetP))
         {
@@ -780,12 +828,13 @@ void moveStatus(ITrickerAPI& api)
     }
     */
 }
+
 void retreatStatus(ITrickerAPI& api)
 {
     std::cout << "retreat" << std::endl;
-    if (isCrossingWindow == 1)
+    if (isCrossingWindow)
     {
-        if (isSurroundWindow(api) == 1 && isDelayedAfterWindow(api) == 1)
+        if (isSurroundWindow(api) && isDelayedAfterWindow(api))
         {
             std::cout << "my skipping window!" << std::endl;
             api.SkipWindow();
@@ -817,7 +866,6 @@ void retreatStatus(ITrickerAPI& api)
     }
 }
 
-
 void initialStatus(ITrickerAPI& api)
 {
     std::cout << "initial" << std::endl;
@@ -837,6 +885,7 @@ void initialStatus(ITrickerAPI& api)
     BotStatus = status::move;
     printQueue(path);
 }
+
 void idleStatus(ITrickerAPI& api)
 {
     std::cout << "idling!" << std::endl;
